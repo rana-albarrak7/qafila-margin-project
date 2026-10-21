@@ -16,6 +16,7 @@ import sqlite3
 from contextlib import closing
 
 import pandas as pd
+import pyarrow as pa
 from pathlib import Path
 
 import duckdb
@@ -23,7 +24,7 @@ from pyiceberg.catalog.sql import SqlCatalog
 
 DBT_DIR = Path(__file__).resolve().parent / "dbt"
 APP_TABLES = ["orders", "order_items", "products", "stores"]
-
+PUBLISHED_TABLES = ["silver.product_cost_history", "gold.weekly_margin", "quality.price_quarantine"]
 def get_catalog(warehouse: Path) -> SqlCatalog:
     """The Iceberg catalog the grader reads. Don't change the name, the URI or the warehouse."""
     warehouse.mkdir(parents=True, exist_ok=True)
@@ -71,15 +72,38 @@ def transform(db: Path) -> None:
 
 
 def publish(db: Path, warehouse: Path) -> None:
-    """Step 5: publish three dbt models to Iceberg (see the brief for the exact columns).
+    """Step 5: publish the three dbt models to Iceberg, updating each table in place.
 
-        silver.product_cost_history   gold.weekly_margin   quality.price_quarantine
-
-    Update existing tables in place, never drop and recreate them: the table's snapshots are
-    how we see what a number was before the supplier's correction arrived.
+    A table is only rewritten when its rows changed, so a re-run on the same data adds no
+    snapshot, and the snapshot from before a correction stays readable (time travel).
     """
     catalog = get_catalog(warehouse)
-    raise NotImplementedError("Step 5: publish the models to Iceberg")
+    with duckdb.connect(str(db)) as con:
+        for name in PUBLISHED_TABLES:
+            namespace = name.split(".")[0]
+            new_rows = con.sql(f"SELECT * FROM {name}").fetch_arrow_table()
+
+            catalog.create_namespace_if_not_exists(namespace)
+            table = catalog.create_table_if_not_exists(name, schema=new_rows.schema)
+
+            if same_rows(table.scan().to_arrow(), new_rows):
+                print(f"{name}: unchanged, no new snapshot")
+                continue
+            table.overwrite(new_rows)  # replaces the contents; older snapshots are kept
+            print(f"{name}: {new_rows.num_rows} rows, snapshot {table.current_snapshot().snapshot_id}")
+
+
+def same_rows(old: pa.Table, new: pa.Table) -> bool:
+    """True when both tables hold exactly the same rows, in any order."""
+    if old.num_rows != new.num_rows:
+        return False
+    with duckdb.connect() as tmp:  # in-memory database, only for the comparison
+        tmp.register("old_rows", old)
+        tmp.register("new_rows", new)
+        extra = tmp.sql(
+            "SELECT count(*) FROM (SELECT * FROM new_rows EXCEPT ALL SELECT * FROM old_rows)"
+        ).fetchone()[0]
+    return extra == 0
 
 
 def main() -> None:
