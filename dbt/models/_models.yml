@@ -1,0 +1,47 @@
+version: 2
+
+models:
+  - name: stg_products
+    description: One row per product, SKU trimmed.
+    columns:
+      - name: sku
+        data_tests: [not_null, unique]
+
+  - name: stg_orders
+    description: One row per order, with its order date in Riyadh time (UTC+3).
+    columns:
+      - name: order_id
+        data_tests: [not_null, unique]
+      - name: order_date
+        data_tests: [not_null]
+
+  - name: product_cost_history
+    description: SCD2 supplier cost history. Grain - one row per SKU per cost version.
+    columns:
+      - name: sku
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_products')
+                field: sku
+      - name: unit_cost_sar
+        data_tests: [not_null]
+      - name: valid_from
+        data_tests: [not_null]
+
+  - name: price_quarantine
+    description: Supplier rows we can't use. Grain - one row per rejected file row.
+    columns:
+      - name: reason
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['unknown_sku', 'invalid_cost']
+
+  - name: weekly_margin
+    description: Gross margin. Grain - one row per iso_week x city x category with at least one counted line.
+    columns:
+      - name: lines
+        data_tests: [not_null]

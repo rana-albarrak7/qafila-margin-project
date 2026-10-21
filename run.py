@@ -81,7 +81,7 @@ def publish(db: Path, warehouse: Path) -> None:
     with duckdb.connect(str(db)) as con:
         for name in PUBLISHED_TABLES:
             namespace = name.split(".")[0]
-            new_rows = con.sql(f"SELECT * FROM {name}").fetch_arrow_table()
+            new_rows = con.sql(f"SELECT * FROM {name}").to_arrow_table()
 
             catalog.create_namespace_if_not_exists(namespace)
             table = catalog.create_table_if_not_exists(name, schema=new_rows.schema)
