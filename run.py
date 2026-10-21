@@ -12,13 +12,17 @@ import argparse
 import os
 import subprocess
 import sys
+import sqlite3
+from contextlib import closing
+
+import pandas as pd
 from pathlib import Path
 
 import duckdb
 from pyiceberg.catalog.sql import SqlCatalog
 
 DBT_DIR = Path(__file__).resolve().parent / "dbt"
-
+APP_TABLES = ["orders", "order_items", "products", "stores"]
 
 def get_catalog(warehouse: Path) -> SqlCatalog:
     """The Iceberg catalog the grader reads. Don't change the name, the URI or the warehouse."""
@@ -27,16 +31,31 @@ def get_catalog(warehouse: Path) -> SqlCatalog:
 
 
 def ingest(data_dir: Path, db: Path) -> None:
-    """Step 1: land the sources in DuckDB, schema `raw`, exactly as they arrive.
+    """Step 1: land the sources in DuckDB, schema `raw`, exactly as they arrive."""
+    # 1) App database: read each table from SQLite as is.
+    with closing(sqlite3.connect(data_dir / "qafila_oltp.sqlite")) as src:
+        tables = {t: pd.read_sql_query(f"SELECT * FROM {t}", src) for t in APP_TABLES}
 
-    - From data_dir/qafila_oltp.sqlite: orders, order_items, products, stores.
-    - Every data_dir/suppliers/prices_*.csv, keeping the file name of each row.
+    # 2) Supplier files: every column as text, so raw costs like "9,49" stay untouched.
+    price_files = sorted((data_dir / "suppliers").glob("prices_*.csv"))
+    if not price_files:
+        raise SystemExit(f"no supplier files found in {data_dir / 'suppliers'}")
 
-    Running this twice must not duplicate anything.
-    """
+    frames = []
+    for path in price_files:
+        df = pd.read_csv(path, dtype=str, encoding="utf-8-sig", keep_default_na=False)
+        df["source_file"] = path.name
+        frames.append(df)
+    # Files have different columns (W39 renames unit_cost -> cost_sar): concat unions them by name.
+    tables["supplier_prices"] = pd.concat(frames, ignore_index=True)
+
+    # 3) Write to DuckDB. CREATE OR REPLACE makes re-runs safe: nothing is ever appended twice.
     with duckdb.connect(str(db)) as con:  # closes the file before dbt opens it
         con.sql("CREATE SCHEMA IF NOT EXISTS raw")
-        raise NotImplementedError("Step 1: load the sources into the raw schema")
+        for name, df in tables.items():
+            con.register("incoming", df)
+            con.sql(f"CREATE OR REPLACE TABLE raw.{name} AS SELECT * FROM incoming")
+            con.unregister("incoming")
 
 
 def transform(db: Path) -> None:
